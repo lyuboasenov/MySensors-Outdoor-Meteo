@@ -46,6 +46,8 @@
 #define CHILD_BATTERY_mV_ID 10
 #define CHILD_BATTERY_ADC_ID 9
 
+#define CHILD_PRESSURE_ID 11
+
 #define CHILD_PMS_ERROR 255
 #define CHILD_SHT_ERROR 254
 
@@ -54,7 +56,14 @@
 
 #include <MySensors.h>
 
+#ifdef SHT31
 #include <SHT31.h>
+#endif // SHT31
+#ifdef BME280
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#endif // BME280
+
 #include <Wire.h>
 
 #include <PMS.h>
@@ -65,6 +74,8 @@
 #else
 #define MAIN_DEBUG(x,...)
 #endif
+
+#define SEALEVELPRESSURE_HPA (1013.25)
 
 #define PMS_MODUS 3
 
@@ -102,8 +113,8 @@ const uint32_t SLEEP_TIME = (uint32_t) 10 * 60 * 1000;  // sleep time between re
  * NodeId/255/3/0/32 = ?
 *******************************************************************/
 
-MyMessage msgTemp(CHILD_TEMP_ID, V_TEMP);
-MyMessage msgHum(CHILD_HUM_ID, V_HUM);
+MyMessage msgTemperature(CHILD_TEMP_ID, V_TEMP);
+MyMessage msgHumidity(CHILD_HUM_ID, V_HUM);
 
 MyMessage msgPmsSp1(CHILD_PMS_SP1_ID, V_CUSTOM);
 MyMessage msgPmsSp2_5(CHILD_PMS_SP2_5_ID, V_CUSTOM);
@@ -113,11 +124,17 @@ MyMessage msgPmsAe2_5(CHILD_PMS_AE2_5_ID, V_CUSTOM);
 MyMessage msgPmsAe10(CHILD_PMS_AE10_ID, V_CUSTOM);
 MyMessage msgBattery_mV(CHILD_BATTERY_mV_ID, V_CUSTOM);
 MyMessage msgBatteryAdc(CHILD_BATTERY_ADC_ID, V_CUSTOM);
+MyMessage msgPressure(CHILD_PRESSURE_ID, V_PRESSURE);
 
 MyMessage msgPmsError(CHILD_PMS_ERROR, V_CUSTOM);
 MyMessage msgShtError(CHILD_SHT_ERROR, V_CUSTOM);
 
+#ifdef SHT31
 SHT31 sht;
+#endif //SHT31
+#ifdef BME280
+Adafruit_BME280 bme; // I2C
+#endif // BME280
 bool shtSuccessful = false;
 
 static const uint32_t PMS_READ_DELAY = 30000;
@@ -134,7 +151,7 @@ void enableBoostConverter();
 void disableBoostConverterIfEnoughPower();
 void readSensors();
 void readBatteryLevel();
-void readSht();
+void readTemperatureHumidityPressure();
 void sendData();
 void retryingSend(MyMessage &message);
 void waitingPresent(const uint8_t childSensorId, const mysensors_sensor_t sensorType, const char *description);
@@ -162,18 +179,23 @@ void setup() {
 
 void presentation() {
    // Send the sketch version information to the gateway and Controller
-	sendSketchInfo("Outdoor Meteo", "0.9");
+	sendSketchInfo("Weather Station", "0.95");
 
 	// Register all sensors to gw (they will be created as child devices)
-	waitingPresent(CHILD_TEMP_ID, S_TEMP, "Temperature sensor - C^0");
-	waitingPresent(CHILD_HUM_ID, S_HUM, "Humidity sensor - %");
+#if defined(SHT31) || defined(BME280)
+	waitingPresent(CHILD_TEMP_ID, S_TEMP, "Temperature °C");
+	waitingPresent(CHILD_HUM_ID, S_HUM, "Humidity %");
+#endif
+#ifdef BME280
+	waitingPresent(CHILD_PRESSURE_ID, S_BARO, "Pressure hPa");
+#endif
 
-	waitingPresent(CHILD_PMS_SP1_ID, S_CUSTOM, "Particle sensor (SP) ug/m^3");
-	waitingPresent(CHILD_PMS_SP2_5_ID, S_CUSTOM, "Particle sensor (SP), ug/m^3");
-	waitingPresent(CHILD_PMS_SP10_ID, S_CUSTOM, "Particle sensor (SP) ug/m^3");
-	waitingPresent(CHILD_PMS_AE1_ID, S_CUSTOM, "Particle sensor (AE) ug/m^3");
-	waitingPresent(CHILD_PMS_AE2_5_ID, S_CUSTOM, "Particle sensor (AE) ug/m^3");
-	waitingPresent(CHILD_PMS_AE10_ID, S_CUSTOM, "Particle sensor (AE) ug/m^3");
+	waitingPresent(CHILD_PMS_SP1_ID, S_CUSTOM, "SP 1.0 ug/m^3");
+	waitingPresent(CHILD_PMS_SP2_5_ID, S_CUSTOM, "SP 2.5, ug/m^3");
+	waitingPresent(CHILD_PMS_SP10_ID, S_CUSTOM, "SP 10 ug/m^3");
+	waitingPresent(CHILD_PMS_AE1_ID, S_CUSTOM, "AE 1.0 ug/m^3");
+	waitingPresent(CHILD_PMS_AE2_5_ID, S_CUSTOM, "AE 2.5 ug/m^3");
+	waitingPresent(CHILD_PMS_AE10_ID, S_CUSTOM, "AE 10 ug/m^3");
 	waitingPresent(CHILD_BATTERY_mV_ID, S_CUSTOM, "Battery mV");
 
 	waitingPresent(CHILD_PMS_ERROR, S_CUSTOM, "Particle sensor error");
@@ -239,8 +261,9 @@ void sendData() {
    retryingSend(msgBatteryAdc);
 
    if (shtSuccessful) {
-      retryingSend(msgTemp);
-      retryingSend(msgHum);
+      retryingSend(msgTemperature);
+      retryingSend(msgHumidity);
+      retryingSend(msgPressure);
    } else {
       retryingSend(msgShtError);
    }
@@ -315,7 +338,7 @@ void readSensors() {
 
    readBatteryLevel();
 
-   readSht();
+   readTemperatureHumidityPressure();
 
    if (shouldReadPms) {
       int32_t diff = PMS_READ_DELAY - (millis() - start);
@@ -352,14 +375,16 @@ void readSensors() {
    digitalWrite(MY_SENSORS_POWER_PIN, LOW);
 }
 
-void readSht() {
+void readTemperatureHumidityPressure() {
    Wire.begin();
-   sht.begin(SHT_DEFAULT_ADDRESS);
    Wire.setClock(10000UL);
+#ifdef SHT31
+   sht.begin(SHT_DEFAULT_ADDRESS);
 
    if (sht.read()) {
-	   msgTemp.set(sht.getTemperature(), 2);
-	   msgHum.set(sht.getHumidity(), 2);
+	   msgTemperature.set(sht.getTemperature(), 2);
+	   msgHumidity.set(sht.getHumidity(), 2);
+      msgPressure.set(SEALEVELPRESSURE_HPA, 2);
 
       MAIN_DEBUG(PSTR("MAIN:TEMP:%" PRIi16 ".\n"), (int16_t)sht.getTemperature());
       MAIN_DEBUG(PSTR("MAIN:HUM:%" PRIi16 "\n"), (int16_t)sht.getHumidity());
@@ -369,7 +394,29 @@ void readSht() {
       msgShtError.set(sht.getError());
       shtSuccessful = false;
    }
+#endif // SHT31
+#ifdef BME280
+   unsigned status;
+   // status = bme.begin();
+   // You can also pass in a Wire library object like &Wire2
+   status = bme.begin(0x76, &Wire);
+   bme.init();
+   if (status) {
+      msgTemperature.set(bme.readTemperature(), 2);
+      msgHumidity.set(bme.readHumidity(), 2);
+      msgPressure.set(bme.readPressure() / 100.0F, 2);
 
+      MAIN_DEBUG(PSTR("MAIN:BME:%" PRIu32 ".\n"), bme.sensorID());
+      MAIN_DEBUG(PSTR("MAIN:TEMP:%" PRIi16 ".\n"), (int16_t)bme.readTemperature());
+      MAIN_DEBUG(PSTR("MAIN:HUM:%" PRIi16 "\n"), (int16_t)bme.readHumidity());
+      MAIN_DEBUG(PSTR("MAIN:PRES:%" PRIi16 "\n"), (int16_t)bme.readPressure());
+      shtSuccessful = true;
+   } else {
+      MAIN_DEBUG(PSTR("MAIN:BME:%" PRIu32 ".\n"), bme.sensorID());
+      MAIN_DEBUG(PSTR("!MAIN:BME.\n"));
+   }
+
+#endif // BME280
    Wire.end();
 }
 
