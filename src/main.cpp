@@ -77,10 +77,10 @@
 
 #define SEALEVELPRESSURE_HPA (1013.25)
 
-#define PMS_MODUS 3
+#define PMS_MODUS 2
 
 uint8_t loop_counter = 0;
-const uint32_t SLEEP_TIME = (uint32_t) 10 * 60 * 1000;  // sleep time between reads (seconds * 1000 milliseconds)
+const uint32_t SLEEP_TIME = (uint32_t) SLEEP_TIME_MINUTES * 60 * 1000;  // sleep time between reads (seconds * 1000 milliseconds)
 // const uint32_t SLEEP_TIME = (uint32_t) 30 * 1000;  // sleep time between reads (seconds * 1000 milliseconds)
 
 /*******************************************************************
